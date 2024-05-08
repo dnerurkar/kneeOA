@@ -1,0 +1,151 @@
+from google.colab import drive
+drive.mount('/content/drive')
+# import module
+!pip install optuna
+from tensorflow import keras
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications.vgg16 import preprocess_input
+from tensorflow.keras.applications.vgg16 import VGG16
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau, TensorBoard
+import matplotlib.pyplot as plt
+import numpy as np
+import optuna
+
+# load dataset
+train_datagen = ImageDataGenerator(
+        rescale=1./255,
+        shear_range=0.1,
+        zoom_range=0.1)
+test_datagen = ImageDataGenerator(rescale=1./255,)
+
+base_path = '/content/drive/MyDrive/OA Dataset/'
+train_ds = train_datagen.flow_from_directory(
+    directory=base_path+'train/',
+    class_mode='binary',
+    batch_size=16,
+    target_size=(224, 224))
+valid_ds = test_datagen.flow_from_directory(
+    directory=base_path+'val/',
+    class_mode='binary',
+    batch_size=16,
+    target_size=(224, 224))
+test_ds = test_datagen.flow_from_directory(
+    directory=base_path+'test/',
+    class_mode='binary',
+    batch_size=16,
+    target_size=(224, 224))
+
+# verify the dataset
+plt.figure(figsize=(10, 10))
+for images, labels in train_ds:
+    count = 1
+    for image in images[:9]:
+        ax = plt.subplot(3, 3, count)
+        plt.imshow(image)
+        count += 1
+    break
+
+
+# build model
+## Loading VGG16 model
+base_model = VGG16(weights="imagenet", include_top=False, input_shape=(224, 224, 3))
+#base_model.trainable = False ## Not trainable weights
+model = models.Sequential()
+model.add(base_model)
+
+model.add(layers.Flatten())
+model.add(layers.Dropout(0.45))
+model.add(layers.Dense(1024, activation='relu'))
+model.add(layers.Dense(1, activation='sigmoid'))
+#model.add(layers.Dense(2, activation='softmax'))
+model.summary()
+
+
+model.compile(
+    keras.optimizers.Adam(learning_rate=0.000015, decay=0.0001),
+    loss='binary_crossentropy',
+   # loss='categorical_crossentropy',
+    metrics=['accuracy'],
+)
+# callbacks and checkpoints
+
+#saves best model as a checkpoint file under name "model_best.h5"
+checkpoint_path = "model_best.h5"
+my_callbacks = [
+               ModelCheckpoint(checkpoint_path,
+                               monitor = 'val_accuracy',
+                               verbose = 1,
+                               save_best_only = True),
+              ReduceLROnPlateau(monitor='val_loss',
+                                patience=3,
+                                verbose=1),
+              TensorBoard(log_dir='log/')
+
+            ]
+model.fit(train_ds, steps_per_epoch=len(train_ds), epochs=20, validation_data=valid_ds, callbacks=[my_callbacks])
+
+%tensorboard --logdir log
+
+model.load_weights(checkpoint_path)
+loss, accuracy = model.evaluate(test_ds)
+accuracy
+
+
+# object function
+def objective(trial):
+    drop_rate = trial.suggest_float("drop_rate", 0, 0.5)
+    # 0, 0.1, 0.2, 0.3, 0.4, 0.5
+    base_model = VGG16(weights="imagenet", include_top=False, input_shape=(224, 224, 3))
+    #base_model.trainable = False ## Not trainable weights
+    model = models.Sequential()
+    model.add(base_model)
+    model.add(layers.Flatten())
+    model.add(layers.Dropout(drop_rate))
+    # 0~0.5
+    # training is updating the weights by backward process
+    # 60% weights will be updated during the training
+    model.add(layers.Dense(1024, activation='relu'))
+    model.add(layers.Dense(1, activation='sigmoid'))
+
+    optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "RMSprop", "SGD"])
+    lr = trial.suggest_float("lr", 1e-6, 1e-4, log=True)
+    # 1e-6, 1e-5, 1e-4
+    # 1e-6, 5e-5, 1e-4
+    # 1~1000
+    # 1, 10, 100, 1000
+    # 1, 250, 500, 1000
+    optimizer = getattr(keras.optimizers, optimizer_name)(learning_rate=lr, decay=0.0001)
+    model.compile(
+        optimizer,
+        loss='binary_crossentropy',
+        metrics=['accuracy'],
+    )
+    my_callbacks = [
+                  ReduceLROnPlateau(monitor='val_loss',
+                                    patience=3,
+                                    verbose=0)
+                    ]
+    model.fit(train_ds, steps_per_epoch=len(train_ds), epochs=20, validation_data=valid_ds, callbacks=[my_callbacks], verbose=0)
+    loss, accuracy = model.evaluate(valid_ds)
+    return accuracy
+
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=50, gc_after_trial=True)
+
+pruned_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
+complete_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+
+print("Study statistics: ")
+print("  Number of finished trials: ", len(study.trials))
+print("  Number of pruned trials: ", len(pruned_trials))
+print("  Number of complete trials: ", len(complete_trials))
+
+print("Best trial:")
+trial = study.best_trial
+
+print("  Value: ", trial.value)
+
+print("  Params: ")
+for key, value in trial.params.items():
+    print("    {}: {}".format(key, value))
